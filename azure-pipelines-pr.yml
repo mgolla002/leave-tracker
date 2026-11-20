@@ -1,0 +1,53 @@
+trigger: none
+
+pr:
+  branches:
+    include:
+    - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: jfrog-vars
+  - name: snapVersion
+    value: 0.0.0.dev$(Build.BuildId)
+  - name: img
+    value: $(JFROG_URL)/docker-trial/leave-tracker
+
+steps:
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.12'
+
+- script: pip install -r requirements-dev.txt
+  displayName: Install dependencies
+
+- script: pytest -q
+  displayName: Run tests
+
+- script: |
+    sed -i 's/^version = .*/version = "$(snapVersion)"/' pyproject.toml
+    python -m build
+    ls -l dist
+  displayName: Build snapshot wheel $(snapVersion)
+
+- script: |
+    docker build --build-arg APP_VERSION=$(snapVersion) -t $(img):pr-$(System.PullRequest.PullRequestNumber)-$(Build.BuildId) .
+    docker run -d -p 8080:8000 --name lt $(img):pr-$(System.PullRequest.PullRequestNumber)-$(Build.BuildId)
+    curl -sf --retry 10 --retry-delay 2 --retry-connrefused http://localhost:8080/version
+    echo
+    curl -s http://localhost:8080/leave/e1
+    docker rm -f lt
+  displayName: Build image and smoke test it
+
+- script: |
+    twine upload \
+      --repository-url https://$(JFROG_URL)/artifactory/api/pypi/pypi-snapshot \
+      -u $(JFROG_USER) -p $(JFROG_TOKEN) dist/*
+  displayName: PUSH snapshot wheel to pypi-snapshot
+
+- script: |
+    echo "$(JFROG_TOKEN)" | docker login $(JFROG_URL) -u $(JFROG_USER) --password-stdin
+    docker push $(img):pr-$(System.PullRequest.PullRequestNumber)-$(Build.BuildId)
+  displayName: PUSH snapshot image

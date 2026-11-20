@@ -1,0 +1,42 @@
+trigger: none
+pr: none
+
+parameters:
+- name: version
+  displayName: Release version to pull (example 1.0.0)
+  type: string
+  default: 1.0.0
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: jfrog-vars
+
+steps:
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.12'
+
+- script: |
+    ENC_USER=$(python -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$(JFROG_USER)")
+    pip install leave-tracker==${{ parameters.version }} \
+      --index-url "https://${ENC_USER}:$(JFROG_TOKEN)@$(JFROG_URL)/artifactory/api/pypi/pypi-release/simple" \
+      --extra-index-url https://pypi.org/simple
+    pip show leave-tracker
+  displayName: PULL wheel ${{ parameters.version }} from pypi-release
+
+- script: |
+    curl -sf -u "$(JFROG_USER):$(JFROG_TOKEN)" \
+      "https://$(JFROG_URL)/artifactory/generic-local/leave-tracker/${{ parameters.version }}/RELEASE_NOTES.md"
+  displayName: PULL release notes
+
+- script: |
+    IMG=$(JFROG_URL)/docker-trial/leave-tracker
+    echo "$(JFROG_TOKEN)" | docker login $(JFROG_URL) -u $(JFROG_USER) --password-stdin
+    docker pull $IMG:${{ parameters.version }}
+    docker run -d -p 8080:8000 --name lt $IMG:${{ parameters.version }}
+    curl -sf --retry 10 --retry-delay 2 --retry-connrefused http://localhost:8080/version
+    echo
+    curl -s http://localhost:8080/leave/e1 || { docker logs lt; exit 1; }
+  displayName: PULL image and run it

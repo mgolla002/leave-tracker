@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leave-tracker"
+version = "0.0.0"
+description = "Sample leave tracker API"
+requires-python = ">=3.10"
+dependencies = ["flask"]
+
+[tool.setuptools]
+packages = ["leavetracker"]

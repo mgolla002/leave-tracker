@@ -1,0 +1,90 @@
+trigger:
+  branches:
+    exclude:
+    - '*'
+  tags:
+    include:
+    - 'v*'
+
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: jfrog-vars
+  - name: img
+    value: $(JFROG_URL)/docker-trial/leave-tracker
+
+steps:
+- checkout: self
+  fetchDepth: 0
+  fetchTags: true
+
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.12'
+
+- script: |
+    VERSION="$(Build.SourceBranchName)"
+    VERSION="${VERSION#v}"
+    if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+      echo "Tag must look like v1.2.3, got: $(Build.SourceBranchName)"
+      exit 1
+    fi
+    echo "Releasing version $VERSION"
+    echo "##vso[task.setvariable variable=releaseVersion]$VERSION"
+  displayName: Get version from the git tag
+
+- script: pip install -r requirements-dev.txt
+  displayName: Install dependencies
+
+- script: pytest -q
+  displayName: Run tests
+
+- script: |
+    sed -i 's/^version = .*/version = "$(releaseVersion)"/' pyproject.toml
+    python -m build
+    ls -l dist
+  displayName: Build release wheel
+
+- script: |
+    docker build --build-arg APP_VERSION=$(releaseVersion) -t $(img):$(releaseVersion) .
+    docker run -d -p 8080:8000 --name lt $(img):$(releaseVersion)
+    curl -sf --retry 10 --retry-delay 2 --retry-connrefused http://localhost:8080/version | tee version.json
+    echo
+    grep '"$(releaseVersion)"' version.json
+    docker rm -f lt
+  displayName: Build image and verify it reports the right version
+
+- script: |
+    twine upload \
+      --repository-url https://$(JFROG_URL)/artifactory/api/pypi/pypi-release \
+      -u $(JFROG_USER) -p $(JFROG_TOKEN) dist/*
+  displayName: PUSH wheel to pypi-release
+
+- script: |
+    echo "$(JFROG_TOKEN)" | docker login $(JFROG_URL) -u $(JFROG_USER) --password-stdin
+    docker tag $(img):$(releaseVersion) $(img):latest
+    docker push $(img):$(releaseVersion)
+    docker push $(img):latest
+  displayName: PUSH image
+
+- script: |
+    PREV=$(git describe --tags --abbrev=0 "$(Build.SourceVersion)^" 2>/dev/null || true)
+    {
+      echo "# leave-tracker $(releaseVersion)"
+      echo "Released: $(date -u +%F)"
+      echo "Commit: $(Build.SourceVersion)"
+      echo
+      echo "## Changes"
+      if [ -n "$PREV" ]; then
+        git log "$PREV"..HEAD --pretty=format:"- %s (%h)"
+      else
+        git log --pretty=format:"- %s (%h)"
+      fi
+    } > RELEASE_NOTES.md
+    cat RELEASE_NOTES.md
+    curl -sf -u "$(JFROG_USER):$(JFROG_TOKEN)" -T RELEASE_NOTES.md \
+      "https://$(JFROG_URL)/artifactory/generic-local/leave-tracker/$(releaseVersion)/RELEASE_NOTES.md"
+  displayName: Generate and PUSH release notes
